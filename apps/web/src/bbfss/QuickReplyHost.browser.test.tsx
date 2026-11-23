@@ -11,6 +11,7 @@ import { AsyncResult } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
+import "~/index.css";
 import { act, fakeTimers, render } from "../../test/render";
 
 const mockState = vi.hoisted(() => ({
@@ -238,9 +239,14 @@ it("navigates across queued completed threads without stacking multiple cards", 
 
 it("toggles quick reply on and off from the bbfss settings panel", async () => {
   using _test = setupQuickReplyTest();
-  await using _screen = await render(<BbfssSettingsPanel />, {
-    router: "/settings/bbfss",
-  });
+  await using _screen = await render(
+    <div className="flex h-screen flex-col">
+      <BbfssSettingsPanel />
+    </div>,
+    {
+      router: "/settings/bbfss",
+    },
+  );
 
   const toggle = page.getByRole("switch", { name: "会话完成快捷续聊弹窗" });
   await expect.element(toggle).toHaveAttribute("aria-checked", "true");
