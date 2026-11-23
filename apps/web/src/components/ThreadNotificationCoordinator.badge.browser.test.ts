@@ -7,6 +7,7 @@ import { expect, it, vi } from "vite-plus/test";
 
 import { fakeTimers, stubGlobal } from "../../test/render";
 import { RELEASED_COMPLETION_GRACE_MS } from "./ThreadNotificationCoordinator.logic";
+import { updateBbfssSettings } from "../bbfss/settings";
 
 const state = vi.hoisted(() => ({
   mode: "notifications",
@@ -198,6 +199,7 @@ function setup() {
   stack.defer(() => testRegistry.dispose());
   state.mode = "notifications";
   state.inApp = false;
+  updateBbfssSettings({ completionQuickReplyEnabled: false });
   state.settingsListeners.clear();
   registry.set(environmentIdsAtom, ["one", "two"]);
   state.shells.set("one", shell());

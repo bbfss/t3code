@@ -1,0 +1,310 @@
+name: bbfss Upstream Sync
+
+on:
+  schedule:
+    # Check official pingdotgg/t3code releases every 2 hours (minute 17 avoids top-of-hour queue spikes).
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Upstream target: 'release' (latest official verified Release) or 'main' (latest pingdotgg/t3code:main HEAD)"
+        required: false
+        default: release
+        type: choice
+        options:
+          - release
+          - main
+      track:
+        description: "Official release track when source='release' (also sets release channel)"
+        required: false
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - stable
+      force_build:
+        description: "Rebuild and publish even if bbfss already contains the upstream target"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: bbfss-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream into bbfss
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      should_release: ${{ steps.finalize.outputs.should_release }}
+      head_sha: ${{ steps.finalize.outputs.head_sha }}
+      upstream_desc: ${{ steps.sync_git.outputs.upstream_desc }}
+      channel: ${{ steps.resolve_target.outputs.channel }}
+    steps:
+      - id: resolve_target
+        name: Resolve upstream target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SOURCE: ${{ inputs.source || 'release' }}
+          INPUT_TRACK: ${{ inputs.track || 'nightly' }}
+        run: |
+          set -euo pipefail
+          source_mode="${INPUT_SOURCE:-release}"
+          track="${INPUT_TRACK:-nightly}"
+          echo "source_mode=${source_mode}" >> "$GITHUB_OUTPUT"
+          echo "channel=${track}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$source_mode" == "main" ]]; then
+            echo "upstream_tag=main" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          releases_json="$(curl -fsSL --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=30")"
+
+          if [[ "$track" == "stable" ]]; then
+            tag="$(jq -r '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty' <<<"$releases_json")"
+          else
+            tag="$(jq -r '[.[] | select(.draft == false and (.tag_name | test("-nightly\\.")))][0].tag_name // empty' <<<"$releases_json")"
+            if [[ -z "$tag" ]]; then
+              tag="$(jq -r '[.[] | select(.draft == false)][0].tag_name // empty' <<<"$releases_json")"
+            fi
+          fi
+
+          if [[ -z "$tag" ]]; then
+            echo "Could not find a published ${track} release on pingdotgg/t3code." >&2
+            exit 1
+          fi
+
+          echo "Resolved upstream ${track} release tag: ${tag}"
+          echo "upstream_tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - id: sync_git
+        name: Mirror main and merge upstream into bbfss
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: "0"
+          SYNC_SOURCE: ${{ steps.resolve_target.outputs.source_mode }}
+          UPSTREAM_TAG: ${{ steps.resolve_target.outputs.upstream_tag }}
+          FORCE_BUILD: ${{ inputs.force_build == true && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          origin_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          auth_header="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w 0)"
+
+          git init .
+          # Scope credentials strictly to origin so public upstream fetches stay anonymous.
+          git config "http.${origin_url}.extraheader" "AUTHORIZATION: basic ${auth_header}"
+          git remote add origin "$origin_url"
+          git remote add upstream "https://github.com/pingdotgg/t3code.git"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+
+          git fetch --filter=blob:none --no-tags origin \
+            refs/heads/bbfss:refs/remotes/origin/bbfss \
+            refs/heads/main:refs/remotes/origin/main
+
+          if [[ "$SYNC_SOURCE" == "main" ]]; then
+            git fetch --filter=blob:none --no-tags upstream \
+              refs/heads/main:refs/remotes/upstream/main
+            target_ref="refs/remotes/upstream/main"
+            upstream_sha="$(git rev-parse "$target_ref")"
+            upstream_desc="main@${upstream_sha:0:12}"
+          else
+            git fetch --filter=blob:none --no-tags upstream \
+              refs/heads/main:refs/remotes/upstream/main \
+              "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+            target_ref="refs/tags/${UPSTREAM_TAG}^{commit}"
+            upstream_sha="$(git rev-parse "$target_ref")"
+            upstream_desc="${UPSTREAM_TAG}"
+          fi
+
+          echo "upstream_desc=${upstream_desc}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+
+          # Keep origin/main as a pure fast-forward mirror of pingdotgg/t3code:main.
+          if ! git merge-base --is-ancestor refs/remotes/upstream/main refs/remotes/origin/main; then
+            echo "Fast-forwarding origin/main to upstream/main..."
+            git push origin refs/remotes/upstream/main:refs/heads/main
+          fi
+
+          bbfss_sha="$(git rev-parse refs/remotes/origin/bbfss)"
+          if git merge-base --is-ancestor "$upstream_sha" refs/remotes/origin/bbfss; then
+            echo "bbfss (${bbfss_sha:0:12}) already contains ${upstream_desc} (${upstream_sha:0:12})."
+            if [[ "$FORCE_BUILD" == "true" ]]; then
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "head_sha=${bbfss_sha}" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          git checkout -B bbfss refs/remotes/origin/bbfss
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git merge --no-edit -m "chore(bbfss): sync upstream ${upstream_desc}" "$upstream_sha"; then
+            git push origin HEAD:refs/heads/bbfss
+            new_sha="$(git rev-parse HEAD)"
+            echo "Merged ${upstream_desc} cleanly -> ${new_sha:0:12}"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "head_sha=${new_sha}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          echo "Detected merge conflicts: ${conflicts[*]}"
+          need_regen_routes="false"
+          unhandled=()
+          for file in "${conflicts[@]}"; do
+            case "$file" in
+              apps/server/src/mcp/McpWebhookTransport.ts)
+                git checkout --theirs -- "$file"
+                git add -- "$file"
+                ;;
+              apps/web/src/routeTree.gen.ts)
+                git checkout --theirs -- "$file"
+                need_regen_routes="true"
+                ;;
+              *)
+                unhandled+=("$file")
+                ;;
+            esac
+          done
+
+          if (( ${#unhandled[@]} > 0 )); then
+            git merge --abort
+            printf '%s\n' "${unhandled[@]}" > "$RUNNER_TEMP/bbfss-conflicts.txt"
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$need_regen_routes" == "true" ]]; then
+            echo "regen_routes=true" >> "$GITHUB_OUTPUT"
+          else
+            git commit --no-edit
+            git push origin HEAD:refs/heads/bbfss
+            new_sha="$(git rev-parse HEAD)"
+            echo "Auto-resolved safe conflict and pushed ${new_sha:0:12}"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "head_sha=${new_sha}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup web dependencies for routeTree regeneration
+        if: steps.sync_git.outputs.regen_routes == 'true'
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/web...
+          save-pnpm-store: false
+
+      - id: regen_routes
+        name: Regenerate routeTree.gen.ts and push merge
+        if: steps.sync_git.outputs.regen_routes == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'EOF'
+          import { createRequire } from "node:module";
+          import * as path from "node:path";
+          const webReq = createRequire(path.resolve("apps/web/package.json"));
+          const pluginPkg = webReq.resolve("@tanstack/router-plugin/package.json");
+          const { Generator, getConfig } = createRequire(pluginPkg)("@tanstack/router-generator");
+          const root = path.resolve("apps/web");
+          const config = getConfig({ routesDirectory: "./src/routes", generatedRouteTree: "./src/routeTree.gen.ts" }, root);
+          const generator = new Generator({ config, root });
+          await generator.run();
+          EOF
+          vp fmt apps/web/src/routeTree.gen.ts
+          git add apps/web/src/routeTree.gen.ts
+          git commit --no-edit
+          git push origin HEAD:refs/heads/bbfss
+          new_sha="$(git rev-parse HEAD)"
+          echo "Regenerated routeTree.gen.ts and pushed ${new_sha:0:12}"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${new_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Report unhandled upstream conflict via GitHub Issue
+        if: steps.sync_git.outputs.conflict == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          UPSTREAM_DESC: ${{ steps.sync_git.outputs.upstream_desc }}
+          UPSTREAM_SHA: ${{ steps.sync_git.outputs.upstream_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create "bbfss:sync-conflict" --repo "$GH_REPO" --color "D93F0B" --description "Upstream sync conflict requiring manual hook update" --force
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const { RUNNER_TEMP, UPSTREAM_DESC, UPSTREAM_SHA, RUN_URL } = process.env;
+          const files = fs.readFileSync(`${RUNNER_TEMP}/bbfss-conflicts.txt`, "utf8").trim().split(/\r?\n/).filter(Boolean);
+          const body = [
+            `Automated sync with \`pingdotgg/t3code\` (**${UPSTREAM_DESC}**, \`${UPSTREAM_SHA}\`) paused due to merge conflicts in thin hook files:`,
+            "",
+            ...files.map((f) => `- \`${f}\``),
+            "",
+            "All custom features under `apps/web/src/bbfss/` remain untouched on `bbfss`.",
+            `Workflow run: ${RUN_URL}`,
+            "",
+            "To resolve locally:",
+            "```bash",
+            "node scripts/bbfss-sync.mjs",
+            "# resolve the files above, then:",
+            "git push origin bbfss",
+            "```",
+          ].join("\n");
+          fs.writeFileSync(`${RUNNER_TEMP}/bbfss-conflict-body.md`, body, "utf8");
+          NODE
+          existing="$(gh issue list --repo "$GH_REPO" --label "bbfss:sync-conflict" --state open --json number -q '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$GH_REPO" --body-file "$RUNNER_TEMP/bbfss-conflict-body.md"
+          else
+            gh issue create --repo "$GH_REPO" --title "[bbfss Sync] Conflict merging upstream ${UPSTREAM_DESC}" --label "bbfss:sync-conflict" --body-file "$RUNNER_TEMP/bbfss-conflict-body.md"
+          fi
+          exit 1
+
+      - id: finalize
+        name: Finalize sync outputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHOULD_RELEASE: ${{ steps.regen_routes.outputs.should_release || steps.sync_git.outputs.should_release || 'false' }}
+          HEAD_SHA: ${{ steps.regen_routes.outputs.head_sha || steps.sync_git.outputs.head_sha || '' }}
+          UPSTREAM_DESC: ${{ steps.sync_git.outputs.upstream_desc }}
+        run: |
+          set -euo pipefail
+          echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "$SHOULD_RELEASE" == "true" ]]; then
+            existing="$(gh issue list --repo "$GH_REPO" --label "bbfss:sync-conflict" --state open --json number -q '.[].number' || true)"
+            for num in $existing; do
+              gh issue close "$num" --repo "$GH_REPO" --comment "Resolved automatically after syncing ${UPSTREAM_DESC} (${HEAD_SHA:0:12})." || true
+            done
+          fi
+
+  release:
+    name: Build & Publish Synced Release
+    needs: [sync]
+    if: ${{ !cancelled() && needs.sync.result == 'success' && needs.sync.outputs.should_release == 'true' }}
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/bbfss-release.yml
+    with:
+      ref: ${{ needs.sync.outputs.head_sha }}
+      channel: ${{ needs.sync.outputs.channel }}
+      upstream_tag: ${{ needs.sync.outputs.upstream_desc }}

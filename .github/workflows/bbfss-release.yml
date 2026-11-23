@@ -1,0 +1,506 @@
+name: bbfss Release
+
+on:
+  push:
+    branches:
+      - bbfss
+    tags:
+      - "bbfss-v*"
+  pull_request:
+    branches:
+      - bbfss
+    types:
+      - labeled
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel"
+        required: false
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - stable
+      version:
+        description: "Stable version override (e.g. 0.1.12). Defaults to apps/desktop/package.json."
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit SHA to package (defaults to triggering ref)"
+        required: false
+        default: ""
+        type: string
+      channel:
+        description: "Release channel (nightly or stable)"
+        required: false
+        default: nightly
+        type: string
+      version:
+        description: "Stable version override"
+        required: false
+        default: ""
+        type: string
+      upstream_tag:
+        description: "Optional upstream pingdotgg/t3code release/commit synced into this build"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: bbfss-release-${{ (inputs.ref || '') != '' && 'sync' || (github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref) }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Resolve bbfss release metadata
+    if: >-
+      github.repository != 'pingdotgg/t3code' &&
+      (
+        (inputs.ref || '') != '' ||
+        github.event_name != 'pull_request' ||
+        (
+          github.event.label.name == 'bbfss:build' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.meta.outputs.ref }}
+      release_channel: ${{ steps.meta.outputs.release_channel }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      make_latest: ${{ steps.meta.outputs.make_latest }}
+      clerk_publishable_key: ${{ steps.public_config.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ steps.public_config.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ steps.public_config.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ steps.public_config.outputs.relay_url }}
+    steps:
+      - name: Checkout release metadata files
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/apps/desktop/package.json' '/.env.example'
+          git checkout --detach FETCH_HEAD
+
+      - id: meta
+        name: Compute version and tag
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          TARGET_REF: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
+          DISPATCH_CHANNEL: ${{ inputs.channel || github.event.inputs.channel || 'nightly' }}
+          DISPATCH_VERSION: ${{ inputs.version || github.event.inputs.version || '' }}
+          RUN_STARTED_AT: ${{ github.run_started_at }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          short_sha="${TARGET_REF:0:12}"
+          pkg_version="$(node -p 'require("./apps/desktop/package.json").version')"
+          base_core="${pkg_version%%[-+]*}"
+          IFS='.' read -r major minor patch <<< "$base_core"
+          next_patch="${major}.${minor}.$((patch + 1))"
+          build_date="$(date -u -d "$RUN_STARTED_AT" +%Y%m%d 2>/dev/null || date -u +%Y%m%d)"
+
+          if [[ -z "${INPUT_REF:-}" && "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            raw="${GITHUB_REF_NAME#bbfss-v}"
+            version="${raw#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "Invalid release version from tag ${GITHUB_REF_NAME}: ${version}" >&2
+              exit 1
+            fi
+            tag="${GITHUB_REF_NAME}"
+            if [[ "$version" =~ -nightly\.[0-9]{8}\.[0-9]+$ ]]; then
+              release_channel="nightly"
+              is_prerelease="true"
+              make_latest="false"
+            else
+              release_channel="stable"
+              if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                is_prerelease="false"
+                make_latest="true"
+              else
+                is_prerelease="true"
+                make_latest="false"
+              fi
+            fi
+            release_name="T3 Code (bbfss) v${version} (${short_sha})"
+          elif [[ "${DISPATCH_CHANNEL:-nightly}" == "stable" ]]; then
+            raw="${DISPATCH_VERSION:-$base_core}"
+            version="${raw#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "Invalid stable version override: ${raw}" >&2
+              exit 1
+            fi
+            release_channel="stable"
+            tag="bbfss-v${version}"
+            release_name="T3 Code (bbfss) v${version} (${short_sha})"
+            if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              is_prerelease="false"
+              make_latest="true"
+            else
+              is_prerelease="true"
+              make_latest="false"
+            fi
+          else
+            release_channel="nightly"
+            version="${next_patch}-nightly.${build_date}.${RUN_NUMBER}"
+            tag="v${version}"
+            release_name="T3 Code (bbfss) ${version} (${short_sha})"
+            is_prerelease="true"
+            make_latest="false"
+          fi
+
+          {
+            echo "ref=${TARGET_REF}"
+            echo "release_channel=${release_channel}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "release_name=${release_name}"
+            echo "short_sha=${short_sha}"
+            echo "is_prerelease=${is_prerelease}"
+            echo "make_latest=${make_latest}"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: public_config
+        name: Resolve public T3 Connect configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          env_example() { sed -n "s|^T3CODE_$1=||p" .env.example; }
+          clerk_publishable_key="$(env_example CLERK_PUBLISHABLE_KEY)"
+          clerk_jwt_template="$(env_example CLERK_JWT_TEMPLATE)"
+          clerk_cli_oauth_client_id="$(env_example CLERK_CLI_OAUTH_CLIENT_ID)"
+          relay_url="$(env_example RELAY_URL)"
+
+          for var_name in clerk_publishable_key clerk_jwt_template clerk_cli_oauth_client_id relay_url; do
+            if [[ -z "${!var_name}" ]]; then
+              echo "Missing ${var_name} in .env.example" >&2
+              exit 1
+            fi
+            echo "${var_name}=${!var_name}" >> "$GITHUB_OUTPUT"
+          done
+
+  build_bundle:
+    name: Build JS bundle
+    needs: [preflight]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      T3CODE_RELAY_URL: ${{ needs.preflight.outputs.relay_url }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_TELEMETRY_CHANNEL: dev
+    steps:
+      - name: Checkout
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.preflight.outputs.ref }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+        env:
+          pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
+
+      - name: Upload dependency verification
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dependency-verification
+          path: ${{ runner.temp }}/pnpm-metadata/lockfile-verified.jsonl
+          retention-days: 1
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Build JS bundle
+        run: vp run build:desktop:bundle
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop_linux_x64:
+    name: Desktop Linux x64
+    needs: [preflight, build_bundle]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.build_bundle.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: ${{ needs.preflight.outputs.release_channel }}
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.preflight.outputs.relay_url }}
+      label: Linux x64
+      runner: ubuntu-24.04
+      platform: linux
+      target: AppImage
+      arch: x64
+      rust_target: x86_64-unknown-linux-gnu
+      resource_key: linux-x64
+      cli_archive: true
+      launch_check: true
+      save_pnpm_store: true
+
+  desktop_win_x64:
+    name: Desktop Windows x64
+    needs: [preflight, build_bundle]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.build_bundle.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: ${{ needs.preflight.outputs.release_channel }}
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.preflight.outputs.relay_url }}
+      label: Windows x64
+      runner: ubuntu-24.04
+      verify_runner: windows-2025
+      platform: win
+      target: nsis
+      arch: x64
+      rust_target: x86_64-pc-windows-msvc
+      resource_key: win32-x64
+      cli_archive: true
+      save_pnpm_store: false
+
+  desktop_mac_arm64:
+    name: Desktop macOS arm64
+    needs: [preflight, build_bundle]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.build_bundle.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-desktop.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.ref }}
+      release_channel: ${{ needs.preflight.outputs.release_channel }}
+      relay_client_tracing: false
+      clerk_publishable_key: ${{ needs.preflight.outputs.clerk_publishable_key }}
+      clerk_jwt_template: ${{ needs.preflight.outputs.clerk_jwt_template }}
+      clerk_cli_oauth_client_id: ${{ needs.preflight.outputs.clerk_cli_oauth_client_id }}
+      relay_url: ${{ needs.preflight.outputs.relay_url }}
+      label: macOS arm64
+      runner: macos-26
+      platform: mac
+      target: dmg
+      arch: arm64
+      rust_target: aarch64-apple-darwin
+      resource_key: darwin-arm64
+      cli_archive: true
+      launch_check: true
+      save_pnpm_store: true
+
+  publish_release:
+    name: Publish bbfss GitHub Release
+    needs: [preflight, desktop_linux_x64, desktop_win_x64, desktop_mac_arm64]
+    if: >-
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success' &&
+      needs.desktop_linux_x64.result == 'success' &&
+      needs.desktop_win_x64.result == 'success' &&
+      needs.desktop_mac_arm64.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Download all desktop artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Download all CLI archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Normalize updater manifests and write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+
+          # builder-debug.yml is electron-builder's config dump, not an updater feed.
+          rm -f builder-debug.yml
+
+          # release-desktop.yml suffixes Windows manifests with -win-<arch>.yml for
+          # multi-arch merging; restore the canonical <channel>.yml for single-arch x64.
+          for manifest in *-win-x64.yml; do
+            mv "$manifest" "${manifest%-win-x64.yml}.yml"
+          done
+
+          archives=(t3-*.tar.gz t3-*.zip)
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            echo "No CLI archives were produced." >&2
+            exit 1
+          fi
+          sha256sum "${archives[@]}" > SHA256SUMS
+          ls -lh
+          cat SHA256SUMS
+
+      - name: Write release notes
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+          CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          REF_SHA: ${{ needs.preflight.outputs.ref }}
+          UPSTREAM_SYNC: ${{ inputs.upstream_tag || '' }}
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const { VERSION, SHORT_SHA, CHANNEL, REF_SHA, GITHUB_REPOSITORY, UPSTREAM_SYNC } = process.env;
+          const appName = CHANNEL === "nightly" ? "T3 Code (Nightly).app" : "T3 Code (Beta).app";
+          const metaLines = [
+            `- Commit: \`${REF_SHA}\` (\`${SHORT_SHA}\`)`,
+            ...(UPSTREAM_SYNC ? [`- Synced upstream: \`pingdotgg/t3code@${UPSTREAM_SYNC}\``] : []),
+            `- Channel: \`${CHANNEL}\``,
+            `- Update feed: \`${GITHUB_REPOSITORY}\` (auto-syncs upstream & preserves bbfss features)`,
+          ];
+          const notes = [
+            `## bbfss/t3code Custom Build (\`${VERSION}\`)`,
+            "",
+            ...metaLines,
+            "",
+            "### Platforms Included",
+            "- **Windows (x64)**: NSIS installer (`.exe`) with bundled WSL runtime + standalone CLI (`.zip`)",
+            "- **macOS (Apple Silicon / arm64)**: `.dmg` + `.zip` + standalone CLI (`.tar.gz`)",
+            "- **Linux (x64)**: `.AppImage` + `.deb` + standalone CLI (`.tar.gz`)",
+            "",
+            "### Unsigned Build Notes",
+            `- **macOS**: This fork build is ad-hoc signed (not Apple notarized). After dragging \`${appName}\` to \`/Applications\`, run once in Terminal:`,
+            "  ```bash",
+            `  xattr -cr "/Applications/${appName}"`,
+            "  ```",
+            "- **Windows**: If SmartScreen prompts on first launch, choose **More info** -> **Run anyway**.",
+            "",
+            "See `docs/bbfss/README.md` for bbfss feature details and upstream sync instructions.",
+            "",
+          ].join("\n");
+          fs.writeFileSync("release-notes.md", notes, "utf8");
+          NODE
+
+      - name: Resolve release asset list
+        id: release_files
+        shell: bash
+        run: |
+          {
+            echo 'files<<EOF'
+            echo 'release-assets/*.dmg'
+            echo 'release-assets/*.zip'
+            echo 'release-assets/*.AppImage'
+            echo 'release-assets/*.deb'
+            echo 'release-assets/*.exe'
+            echo 'release-assets/*.tar.gz'
+            echo 'release-assets/*.blockmap'
+            echo 'release-assets/*.yml'
+            echo 'release-assets/SHA256SUMS'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.release_name }}
+          body_path: release-notes.md
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          draft: ${{ needs.preflight.outputs.is_prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          files: ${{ steps.release_files.outputs.files }}
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
+
+      - name: Undraft prerelease after all assets finish uploading
+        if: needs.preflight.outputs.is_prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
+
+      - name: Update nightly update-feed pointer
+        if: needs.preflight.outputs.release_channel == 'nightly'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq '{tag_name, name, body}' > nightly.json
+          gh release view update-feed > /dev/null 2>&1 ||
+            gh release create update-feed --prerelease --latest=false --title "Update feed" \
+              --notes "The desktop updater reads this release to find the newest nightly build from ${GH_REPO}. Do not delete it."
+          gh release upload update-feed nightly.json --clobber
+          gh release edit update-feed --draft=false --prerelease --latest=false
+
+      - name: Comment download link on PR
+        if: github.event_name == 'pull_request' && (inputs.ref || '') == ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_url="https://github.com/${GH_REPO}/releases/tag/${RELEASE_TAG}"
+          gh pr comment "$PR_NUMBER" --body "Built and published **${VERSION}** (Windows x64, macOS arm64, Linux x64 + CLI archives): ${release_url}"

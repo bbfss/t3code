@@ -42,6 +42,13 @@ import {
   type ThreadNotificationObservation,
 } from "./ThreadNotificationCoordinator.logic";
 import { toastManager } from "./ui/toast";
+import {
+  clearAllBbfssQuickReplies,
+  closeBbfssQuickReplies,
+  isBbfssQuickReplyEnabled,
+  presentBbfssCompletionNotification,
+  subscribeBbfssSettings,
+} from "../bbfss/notificationBridge";
 
 interface NotificationState extends ThreadNotificationObservation {
   readonly raw: OrchestrationV2ThreadShell;
@@ -90,6 +97,7 @@ export function startThreadNotifications(
     else openToasts.set(key, remaining);
   };
   const closeToasts = (shouldClose: (key: string) => boolean) => {
+    closeBbfssQuickReplies(shouldClose);
     for (const [key, toastIds] of openToasts) {
       if (!shouldClose(key)) continue;
       for (const toastId of toastIds) toastManager.close(toastId);
@@ -160,6 +168,17 @@ export function startThreadNotifications(
       void playNotificationSound(kind, () =>
         hasNotificationSound(getClientSettings().notificationMode),
       );
+    }
+    if (
+      presentBbfssCompletionNotification({
+        environmentId,
+        thread,
+        raw: state.raw,
+        kind,
+        active,
+      })
+    ) {
+      return;
     }
     if (
       inAppNotificationsEnabled &&
@@ -362,7 +381,10 @@ export function startThreadNotifications(
 
   const syncEnvironments = () => {
     const { notificationMode, inAppNotificationsEnabled } = getClientSettings();
-    const enabled = notificationMode !== "off" || inAppNotificationsEnabled;
+    const bbfssQuickReplyEnabled = isBbfssQuickReplyEnabled();
+    const enabled =
+      notificationMode !== "off" || inAppNotificationsEnabled || bbfssQuickReplyEnabled;
+    if (!bbfssQuickReplyEnabled) clearAllBbfssQuickReplies();
     if (!enabled) closeToasts(() => true);
     const environmentIds = enabled ? registry.get(environmentSummaries.environmentIdsAtom) : [];
     const activeIds = new Set(environmentIds);
@@ -425,6 +447,7 @@ export function startThreadNotifications(
     syncEnvironments();
   };
   const unsubscribeSettings = subscribeClientSettings(onSettings);
+  const unsubscribeBbfssSettings = subscribeBbfssSettings(onSettings);
   const unsubscribeEnvironmentIds = registry.subscribe(
     environmentSummaries.environmentIdsAtom,
     () => {
@@ -442,6 +465,7 @@ export function startThreadNotifications(
 
   return () => {
     unsubscribeSettings();
+    unsubscribeBbfssSettings();
     unsubscribeEnvironmentIds();
     for (const unsubscribe of unsubscribeHidden) unsubscribe();
     unsubscribeRoute();
