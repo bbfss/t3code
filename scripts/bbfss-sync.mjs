@@ -101,7 +101,8 @@ function main() {
   run("git", ["fetch", UPSTREAM_REMOTE, UPSTREAM_BRANCH]);
 
   console.log(`2/4 Fast-forwarding local '${UPSTREAM_BRANCH}'...`);
-  const hasLocalMain = dryRun || capture("git", ["rev-parse", "--verify", UPSTREAM_BRANCH], true).status === 0;
+  const hasLocalMain =
+    dryRun || capture("git", ["rev-parse", "--verify", UPSTREAM_BRANCH], true).status === 0;
   if (hasLocalMain) {
     run("git", ["checkout", UPSTREAM_BRANCH]);
     run("git", ["merge", "--ff-only", `${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}`]);

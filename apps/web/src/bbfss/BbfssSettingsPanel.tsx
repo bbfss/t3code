@@ -1,6 +1,10 @@
 import { useGT } from "gt-react";
 
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "../components/settings/settingsLayout";
+import {
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "../components/settings/settingsLayout";
 import { useSearchableSetting } from "../components/settings/settingsSearch";
 import { Switch } from "../components/ui/switch";
 import { updateBbfssSettings, useBbfssSettings } from "./settings";

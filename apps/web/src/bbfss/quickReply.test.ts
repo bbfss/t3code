@@ -162,12 +162,12 @@ describe("bbfss quick reply store", () => {
       { id: MessageId.make("m4"), role: "assistant" as const, text: "   " },
       { id: MessageId.make("m5"), role: "assistant" as const, text: "All 12 tests now pass." },
     ];
-    expect(selectQuickReplyContextMessages(messages, { text: "fallback", role: "assistant" }, 2)).toEqual(
-      [
-        { id: MessageId.make("m3"), role: "user", text: "Check failing tests" },
-        { id: MessageId.make("m5"), role: "assistant", text: "All 12 tests now pass." },
-      ],
-    );
+    expect(
+      selectQuickReplyContextMessages(messages, { text: "fallback", role: "assistant" }, 2),
+    ).toEqual([
+      { id: MessageId.make("m3"), role: "user", text: "Check failing tests" },
+      { id: MessageId.make("m5"), role: "assistant", text: "All 12 tests now pass." },
+    ]);
   });
 
   it("pauses auto-dismiss whenever the user interacts or leaves the window", () => {

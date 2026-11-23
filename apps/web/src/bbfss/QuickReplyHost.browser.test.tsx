@@ -23,37 +23,44 @@ const mockState = vi.hoisted(() => ({
   projectTitle: "t3code" as string | null,
 }));
 
-vi.mock("../state/use-orchestration-command", () => ({
-  useOrchestrationCommand: () => mockState.startTurn,
+vi.mock(import("../state/use-orchestration-command"), async (original) => ({
+  ...(await original()),
+  useOrchestrationCommand: (() => mockState.startTurn) as never,
 }));
 
-vi.mock("../state/threads", () => ({
-  threadEnvironment: {
-    startTurn: { label: "test:start-turn" },
-  },
-  useEnvironmentThread: (environmentId: EnvironmentId | null, threadId: ThreadId | null) => ({
-    status: "live",
-    data:
-      environmentId && threadId && mockState.threadMessages.length > 0
-        ? Option.some({
-            thread: {
-              id: threadId,
-              title: "Background build",
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-            },
-            messages: mockState.threadMessages,
-          })
-        : Option.none(),
-    error: Option.none(),
-    history: { hasMoreHistory: false, historyCursor: null, latestLocalTurnOrdinal: null },
-    sequence: 1,
-  }),
-}));
+vi.mock(import("../state/threads"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    threadEnvironment: {
+      ...actual.threadEnvironment,
+      startTurn: { label: "test:start-turn" } as never,
+    },
+    useEnvironmentThread: ((environmentId: EnvironmentId | null, threadId: ThreadId | null) => ({
+      status: "live",
+      data:
+        environmentId && threadId && mockState.threadMessages.length > 0
+          ? Option.some({
+              thread: {
+                id: threadId,
+                title: "Background build",
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+              },
+              messages: mockState.threadMessages,
+            })
+          : Option.none(),
+      error: Option.none(),
+      history: { hasMoreHistory: false, historyCursor: null, latestLocalTurnOrdinal: null },
+      sequence: 1,
+    })) as never,
+  };
+});
 
-vi.mock("../state/entities", () => ({
-  useProject: () => (mockState.projectTitle ? { title: mockState.projectTitle } : null),
+vi.mock(import("../state/entities"), async (original) => ({
+  ...(await original()),
+  useProject: (() => (mockState.projectTitle ? { title: mockState.projectTitle } : null)) as never,
 }));
 
 import { BbfssSettingsPanel } from "./BbfssSettingsPanel";
