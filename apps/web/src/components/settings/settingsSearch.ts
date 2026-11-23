@@ -39,6 +39,7 @@ export type SettingsPath =
   | "/settings/secrets"
   | "/settings/maintenance"
   | "/settings/labs"
+  | "/settings/bbfss"
   | "/settings/about"
   | "/settings/archived";
 
@@ -117,6 +118,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/secrets": msg("Secrets"),
   "/settings/maintenance": msg("Maintenance"),
   "/settings/labs": msg("Labs"),
+  "/settings/bbfss": msg("bbfss 改动"),
   "/settings/about": msg("About"),
   "/settings/voice": msg("Voice"),
   "/settings/archived": msg("Archive"),
@@ -173,7 +175,13 @@ const ALL_SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
   {
     heading: msg("More"),
     headingHidden: true,
-    paths: ["/settings/maintenance", "/settings/labs", "/settings/about", "/settings/archived"],
+    paths: [
+      "/settings/maintenance",
+      "/settings/labs",
+      "/settings/bbfss",
+      "/settings/about",
+      "/settings/archived",
+    ],
   },
 ];
 
@@ -1510,6 +1518,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/archived",
     searchTerms: [msg("restore reopen deleted history projects")],
   },
+  {
+    id: "bbfss-completion-quick-reply",
+    title: msg("会话完成快捷续聊弹窗"),
+    to: "/settings/bbfss",
+    searchTerms: [msg("bbfss quick reply completion popup toast follow up 续聊 弹窗 改动")],
+  },
 ] as const satisfies ReadonlyArray<SettingsSearchItem>;
 
 export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
@@ -1538,6 +1552,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/scheduled-tasks": null,
   "/settings/maintenance": null,
   "/settings/labs": null,
+  "/settings/bbfss": null,
   "/settings/about": null,
   "/settings/archived": "project-defaults",
 };

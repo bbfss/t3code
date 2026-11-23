@@ -29,6 +29,7 @@ import {
   ServerIcon,
   Settings2Icon,
   ShieldCheckIcon,
+  SlidersHorizontalIcon,
   SmartphoneIcon,
   WrenchIcon,
   XIcon,
@@ -113,6 +114,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/secrets": KeyRoundIcon,
   "/settings/maintenance": WrenchIcon,
   "/settings/labs": FlaskConicalIcon,
+  "/settings/bbfss": SlidersHorizontalIcon,
   "/settings/about": InfoIcon,
   "/settings/archived": ArchiveIcon,
 };
