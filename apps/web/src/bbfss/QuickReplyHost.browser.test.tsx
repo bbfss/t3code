@@ -8,7 +8,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, fakeTimers, render } from "../../test/render";
@@ -89,21 +89,24 @@ function enqueueSample(id: string, title: string, preview: string) {
   });
 }
 
-beforeEach(() => {
+function setupQuickReplyTest(): Disposable {
   vi.clearAllMocks();
   resetBbfssSettings();
   clearAllBbfssQuickReplies();
   mockState.threadMessages = [];
   mockState.projectTitle = "t3code";
   mockState.startTurn.mockResolvedValue(AsyncResult.success({ sequence: 2 }));
-});
-
-afterEach(() => {
-  clearAllBbfssQuickReplies();
-  resetBbfssSettings();
-});
+  return {
+    [Symbol.dispose]() {
+      clearAllBbfssQuickReplies();
+      resetBbfssSettings();
+      vi.restoreAllMocks();
+    },
+  };
+}
 
 it("shows prior context, expands earlier messages, and sends a follow-up without switching routes", async () => {
+  using _test = setupQuickReplyTest();
   mockState.threadMessages = [
     { id: MessageId.make("m1"), role: "user", text: "Fix the notification badge test" },
     { id: MessageId.make("m2"), role: "assistant", text: "Fixed and verified all 8 assertions." },
@@ -157,6 +160,7 @@ it("shows prior context, expands earlier messages, and sends a follow-up without
 });
 
 it("keeps the draft and displays an inline error when follow-up dispatch fails", async () => {
+  using _test = setupQuickReplyTest();
   mockState.startTurn.mockResolvedValueOnce(
     AsyncResult.failure(Cause.fail(new Error("Server disconnected"))),
   );
@@ -176,6 +180,7 @@ it("keeps the draft and displays an inline error when follow-up dispatch fails",
 });
 
 it("auto-dismisses after the default T3 toast timeout when untouched and pauses while typing", async () => {
+  using _test = setupQuickReplyTest();
   using _timers = fakeTimers();
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
   enqueueSample("thread-auto", "Idle thread", "Task finished cleanly.");
@@ -208,6 +213,7 @@ it("auto-dismisses after the default T3 toast timeout when untouched and pauses 
 });
 
 it("navigates across queued completed threads without stacking multiple cards", async () => {
+  using _test = setupQuickReplyTest();
   enqueueSample("thread-1", "First completed", "First summary");
   enqueueSample("thread-2", "Second completed", "Second summary");
 
@@ -224,7 +230,8 @@ it("navigates across queued completed threads without stacking multiple cards", 
 });
 
 it("toggles quick reply on and off from the bbfss settings panel", async () => {
-  await using screen = await render(<BbfssSettingsPanel />, {
+  using _test = setupQuickReplyTest();
+  await using _screen = await render(<BbfssSettingsPanel />, {
     router: "/settings/bbfss",
   });
 
@@ -241,6 +248,7 @@ it("toggles quick reply on and off from the bbfss settings panel", async () => {
 });
 
 it("intercepts foreground completion notifications only when enabled and ignores active thread", () => {
+  using _test = setupQuickReplyTest();
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
   const thread = {
     id: ThreadId.make("thread-bg"),
@@ -290,7 +298,7 @@ it("intercepts foreground completion notifications only when enabled and ignores
       environmentId: ENV_ONE,
       thread: thread as never,
       raw: raw as never,
-      kind: "attention",
+      kind: "input",
       active: { environmentId: ENV_ONE, threadId: ThreadId.make("thread-other") },
     }),
   ).toBe(false);

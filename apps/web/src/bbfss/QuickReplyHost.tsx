@@ -363,7 +363,7 @@ function QuickReplyCard({ entry, activeIndex, totalCount, timeoutMs }: QuickRepl
                     message.role === "user" && "rounded-lg bg-muted/45 px-2.5 py-1.5",
                   )}
                 >
-                  <div className="text-[11px] font-medium text-muted-foreground">
+                  <div className="text-2xs font-medium text-muted-foreground">
                     {message.role === "user" ? <T>You</T> : <T>Assistant</T>}
                   </div>
                   <p className="whitespace-pre-wrap wrap-break-word text-foreground/92">
@@ -410,7 +410,7 @@ function QuickReplyCard({ entry, activeIndex, totalCount, timeoutMs }: QuickRepl
         <div className="flex items-end gap-1.5">
           <textarea
             aria-label={gt("Follow-up prompt")}
-            className="field-sizing-content max-h-28 min-h-8 flex-1 resize-none rounded-lg border border-input bg-background/85 px-2.5 py-1.5 text-xs leading-normal text-foreground outline-none placeholder:text-muted-foreground/75 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/24 disabled:opacity-60 dark:bg-input/32"
+            className="field-sizing-content max-h-28 min-h-8 flex-1 resize-none rounded-lg border border-input bg-background/85 px-2.5 py-1.5 text-xs leading-normal text-foreground outline-none placeholder:text-muted-foreground/75 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/24 disabled:opacity-60 dark:bg-input/32"
             disabled={sending}
             placeholder={gt("Continue this thread...")}
             rows={1}
