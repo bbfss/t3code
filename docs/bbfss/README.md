@@ -40,3 +40,22 @@ node scripts/bbfss-sync.mjs --export-patch
 ```
 
 如果合并时仅 `apps/web/src/routeTree.gen.ts` 冲突，采用上游版本后运行一次前端路由生成即可自动恢复。
+
+## 自动化打包与发布（GitHub Actions）
+
+独立工作流 [`.github/workflows/bbfss-release.yml`](../../.github/workflows/bbfss-release.yml) 复用了上游打包子流程 [`release-desktop.yml`](../../.github/workflows/release-desktop.yml) 且**不修改任何上游 workflow 文件**，在免费标准 GitHub Runner 上自动构建并发布到 `bbfss/t3code` Releases：
+
+- **构建产物**：
+  - Windows x64：NSIS 安装包（`.exe`，含内置 WSL runtime）+ CLI 压缩包（`.zip`），并在 `windows-2025` Runner 上运行原生二进制校验
+  - macOS arm64（Apple Silicon）：`.dmg` + `.zip` + CLI 压缩包（`.tar.gz`），并运行安装包启动检查
+  - Linux x64：`.AppImage` + `.deb` + CLI 压缩包（`.tar.gz`），并运行启动检查
+  - 应用内自动更新源（`app-update.yml` 与 `update-feed/nightly.json`）自动指向 `bbfss/t3code`，不会被官方更新覆盖
+- **触发方式**：
+  1. 向 `bbfss` 分支合入 / 推送提交：自动打 Nightly 包（`v0.1.x-nightly.YYYYMMDD.<run>`）
+  2. 在发往 `bbfss` 的内部 PR 上打标签 `bbfss:build`：直接为当前 PR 最新提交打包并回帖下载链接
+  3. 推送 `bbfss-v*` 标签（如 `bbfss-v0.1.12`）：发布对应版本号的发行版
+  4. 手动触发 `workflow_dispatch`（当工作流位于仓库默认分支时）
+- **未签名构建首次启动说明**：
+  - macOS（ad-hoc 签名）：将应用拖入 `/Applications` 后执行一次 `xattr -cr "/Applications/T3 Code (Nightly).app"`（Stable 为 `T3 Code (Beta).app`）
+  - Windows：若 SmartScreen 弹出提示，点击「更多信息」→「仍要运行」
+
