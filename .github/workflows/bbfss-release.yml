@@ -25,15 +25,32 @@ on:
         description: "Stable version override (e.g. 0.1.12). Defaults to apps/desktop/package.json."
         required: false
         type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit SHA to package (defaults to triggering ref)"
+        required: false
+        default: ""
+        type: string
+      channel:
+        description: "Release channel (nightly or stable)"
+        required: false
+        default: nightly
+        type: string
+      version:
+        description: "Stable version override"
+        required: false
+        default: ""
+        type: string
+      upstream_tag:
+        description: "Optional upstream pingdotgg/t3code release/commit synced into this build"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: bbfss-release-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  group: bbfss-release-${{ (inputs.ref || '') != '' && 'sync' || (github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref) }}
   cancel-in-progress: false
-
-permissions:
-  actions: read
-  contents: read
-  id-token: none
 
 jobs:
   preflight:
@@ -41,6 +58,7 @@ jobs:
     if: >-
       github.repository != 'pingdotgg/t3code' &&
       (
+        (inputs.ref || '') != '' ||
         github.event_name != 'pull_request' ||
         (
           github.event.label.name == 'bbfss:build' &&
@@ -49,6 +67,8 @@ jobs:
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       ref: ${{ steps.meta.outputs.ref }}
       release_channel: ${{ steps.meta.outputs.release_channel }}
@@ -66,7 +86,7 @@ jobs:
       - name: Checkout release metadata files
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          CHECKOUT_REF: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
@@ -80,9 +100,10 @@ jobs:
         name: Compute version and tag
         shell: bash
         env:
-          TARGET_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          DISPATCH_CHANNEL: ${{ github.event.inputs.channel }}
-          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REF: ${{ inputs.ref }}
+          TARGET_REF: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
+          DISPATCH_CHANNEL: ${{ inputs.channel || github.event.inputs.channel || 'nightly' }}
+          DISPATCH_VERSION: ${{ inputs.version || github.event.inputs.version || '' }}
           RUN_STARTED_AT: ${{ github.run_started_at }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
@@ -94,7 +115,7 @@ jobs:
           next_patch="${major}.${minor}.$((patch + 1))"
           build_date="$(date -u -d "$RUN_STARTED_AT" +%Y%m%d 2>/dev/null || date -u +%Y%m%d)"
 
-          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          if [[ -z "${INPUT_REF:-}" && "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
             raw="${GITHUB_REF_NAME#bbfss-v}"
             version="${raw#v}"
             if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
@@ -117,7 +138,7 @@ jobs:
               fi
             fi
             release_name="T3 Code (bbfss) v${version} (${short_sha})"
-          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-nightly}" == "stable" ]]; then
+          elif [[ "${DISPATCH_CHANNEL:-nightly}" == "stable" ]]; then
             raw="${DISPATCH_VERSION:-$base_core}"
             version="${raw#v}"
             if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
@@ -179,6 +200,9 @@ jobs:
     if: ${{ !cancelled() && needs.preflight.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
     env:
       T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.preflight.outputs.clerk_publishable_key }}
       T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.preflight.outputs.clerk_jwt_template }}
@@ -235,6 +259,9 @@ jobs:
     name: Desktop Linux x64
     needs: [preflight, build_bundle]
     if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.build_bundle.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/release-desktop.yml
     with:
       version: ${{ needs.preflight.outputs.version }}
@@ -260,6 +287,9 @@ jobs:
     name: Desktop Windows x64
     needs: [preflight, build_bundle]
     if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.build_bundle.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/release-desktop.yml
     with:
       version: ${{ needs.preflight.outputs.version }}
@@ -285,6 +315,9 @@ jobs:
     name: Desktop macOS arm64
     needs: [preflight, build_bundle]
     if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.build_bundle.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/release-desktop.yml
     with:
       version: ${{ needs.preflight.outputs.version }}
@@ -368,17 +401,22 @@ jobs:
           SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
           CHANNEL: ${{ needs.preflight.outputs.release_channel }}
           REF_SHA: ${{ needs.preflight.outputs.ref }}
+          UPSTREAM_SYNC: ${{ inputs.upstream_tag || '' }}
         run: |
           node - <<'NODE'
           const fs = require("node:fs");
-          const { VERSION, SHORT_SHA, CHANNEL, REF_SHA, GITHUB_REPOSITORY } = process.env;
+          const { VERSION, SHORT_SHA, CHANNEL, REF_SHA, GITHUB_REPOSITORY, UPSTREAM_SYNC } = process.env;
           const appName = CHANNEL === "nightly" ? "T3 Code (Nightly).app" : "T3 Code (Beta).app";
+          const metaLines = [
+            `- Commit: \`${REF_SHA}\` (\`${SHORT_SHA}\`)`,
+            ...(UPSTREAM_SYNC ? [`- Synced upstream: \`pingdotgg/t3code@${UPSTREAM_SYNC}\``] : []),
+            `- Channel: \`${CHANNEL}\``,
+            `- Update feed: \`${GITHUB_REPOSITORY}\` (auto-syncs upstream & preserves bbfss features)`,
+          ];
           const notes = [
             `## bbfss/t3code Custom Build (\`${VERSION}\`)`,
             "",
-            `- Commit: \`${REF_SHA}\` (\`${SHORT_SHA}\`)`,
-            `- Channel: \`${CHANNEL}\``,
-            `- Update feed: \`${GITHUB_REPOSITORY}\` (in-app updates stay on this fork)`,
+            ...metaLines,
             "",
             "### Platforms Included",
             "- **Windows (x64)**: NSIS installer (`.exe`) with bundled WSL runtime + standalone CLI (`.zip`)",
@@ -454,7 +492,7 @@ jobs:
           gh release edit update-feed --draft=false --prerelease --latest=false
 
       - name: Comment download link on PR
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && (inputs.ref || '') == ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

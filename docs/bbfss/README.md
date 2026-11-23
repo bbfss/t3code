@@ -6,8 +6,8 @@
 
 | 分支 | 作用 | 规则 |
 | --- | --- | --- |
+| `bbfss` | **仓库默认分支**（长期定制主分支） | 承载所有 bbfss 定制，并自动跟进上游发布 |
 | `main` | 官方 `pingdotgg/t3code:main` 的纯净镜像 | **严禁直接提交任何 bbfss 改动**，只做 fast-forward 同步 |
-| `bbfss` | bbfss 长期定制主分支 | 承载所有已合入的 bbfss 定制 |
 | `feat/bbfss-*` | 单个功能的开发分支 | 从 `bbfss` 切出，完成后在 `bbfss/t3code` **内部**向 `bbfss` 创建 PR |
 
 ## 低冲突隔离架构
@@ -41,20 +41,21 @@ node scripts/bbfss-sync.mjs --export-patch
 
 如果合并时仅 `apps/web/src/routeTree.gen.ts` 冲突，采用上游版本后运行一次前端路由生成即可自动恢复。
 
-## 自动化打包与发布（GitHub Actions）
+## 自动跟随官方更新 + 保留 bbfss 改动（全自动流水线）
 
-独立工作流 [`.github/workflows/bbfss-release.yml`](../../.github/workflows/bbfss-release.yml) 复用了上游打包子流程 [`release-desktop.yml`](../../.github/workflows/release-desktop.yml) 且**不修改任何上游 workflow 文件**，在免费标准 GitHub Runner 上自动构建并发布到 `bbfss/t3code` Releases：
+仓库配备了两条零侵入上游的独立 GitHub Actions 工作流：
 
-- **构建产物**：
-  - Windows x64：NSIS 安装包（`.exe`，含内置 WSL runtime）+ CLI 压缩包（`.zip`），并在 `windows-2025` Runner 上运行原生二进制校验
-  - macOS arm64（Apple Silicon）：`.dmg` + `.zip` + CLI 压缩包（`.tar.gz`），并运行安装包启动检查
-  - Linux x64：`.AppImage` + `.deb` + CLI 压缩包（`.tar.gz`），并运行启动检查
-  - 应用内自动更新源（`app-update.yml` 与 `update-feed/nightly.json`）自动指向 `bbfss/t3code`，不会被官方更新覆盖
-- **触发方式**：
-  1. 向 `bbfss` 分支合入 / 推送提交：自动打 Nightly 包（`v0.1.x-nightly.YYYYMMDD.<run>`）
-  2. 在发往 `bbfss` 的内部 PR 上打标签 `bbfss:build`：直接为当前 PR 最新提交打包并回帖下载链接
-  3. 推送 `bbfss-v*` 标签（如 `bbfss-v0.1.12`）：发布对应版本号的发行版
-  4. 手动触发 `workflow_dispatch`（当工作流位于仓库默认分支时）
+1. **[`.github/workflows/bbfss-sync-upstream.yml`](../../.github/workflows/bbfss-sync-upstream.yml)（自动同步官方更新）**：
+   - 每 2 小时自动检查 `pingdotgg/t3code` 最新已发布的官方 Release（默认跟随 `nightly` 通道，也可在 Actions 面板手动触发选择 `source=main` 立即同步最新主干或 `track=stable` 同步正式版）。
+   - 自动将 `bbfss/t3code:main` 快进同步到上游最新 `main`，并将官方新版本合并进 `bbfss` 分支（若仅 `routeTree.gen.ts` 冲突则自动重新生成路由树自愈；若极少数情况下极薄挂载点发生冲突，则自动创建 `bbfss:sync-conflict` Issue 提醒且绝不丢失或覆盖已有改动）。
+   - 一旦合并出新提交，直接通过 `workflow_call` 串联触发打包发布工作流，无需配置任何额外 PAT / Secret。
+2. **[`.github/workflows/bbfss-release.yml`](../../.github/workflows/bbfss-release.yml)（多平台自动打包与更新源发布）**：
+   - 直接复用上游 [`release-desktop.yml`](../../.github/workflows/release-desktop.yml)（**不修改任何上游 workflow 文件**），在免费标准 GitHub Runner（`ubuntu-24.04`、`macos-26`、`windows-2025`）上构建并发布到 `bbfss/t3code` Releases：
+     - Windows x64：NSIS 安装包（`.exe`，含内置 WSL runtime）+ CLI 压缩包（`.zip`）+ `windows-2025` 原生二进制校验
+     - macOS arm64（Apple Silicon）：`.dmg` + `.zip` + CLI 压缩包（`.tar.gz`）+ DMG 启动检查
+     - Linux x64：`.AppImage` + `.deb` + CLI 压缩包（`.tar.gz`）+ AppImage 启动检查
+   - 应用内自动更新源（`app-update.yml` 与 `update-feed/nightly.json`）指向 `bbfss/t3code`：桌面端收到更新提示并一键重启后，即同时获得**官方最新更新 + 完整保留的 bbfss 改动**。
+   - 其他触发方式：向 `bbfss` 推送/合并提交、在发往 `bbfss` 的内部 PR 打标签 `bbfss:build`、推送 `bbfss-v*` 标签、或在 Actions 页面手动点击 `Run workflow`。
 - **未签名构建首次启动说明**：
   - macOS（ad-hoc 签名）：将应用拖入 `/Applications` 后执行一次 `xattr -cr "/Applications/T3 Code (Nightly).app"`（Stable 为 `T3 Code (Beta).app`）
   - Windows：若 SmartScreen 弹出提示，点击「更多信息」→「仍要运行」
